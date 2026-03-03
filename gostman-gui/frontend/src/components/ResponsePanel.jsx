@@ -205,7 +205,7 @@ export function ResponsePanel({ response, status, responseTime, responseHeaders,
     if (responseCookies?.length) return responseCookies
     const setCookieHeaders = Array.isArray(responseHeaders)
       ? responseHeaders.filter(h => h.key.toLowerCase() === 'set-cookie').map(h => h.value)
-      : Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === 'set-cookie')?.[1] || []
+      : Object.entries(responseHeaders || {}).find(([k]) => k.toLowerCase() === 'set-cookie')?.[1] || []
     const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders].filter(Boolean)
     return headers.map(parseCookieString)
   }, [responseCookies, responseHeaders])

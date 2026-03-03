@@ -157,5 +157,15 @@ export const useAppStore = create(
   )
 )
 
-export const useActiveTab = () => useAppStore((s) => s.tabs.find(t => t.id === s.activeTabId) || s.tabs[0])
-export const useActiveRequest = () => useAppStore((s) => useActiveTab()?.request || { ...DEFAULT_REQUEST })
+export const useActiveTab = () => useAppStore((s) => {
+  if (!s.tabs || s.tabs.length === 0) {
+    return { id: 'tab-1', request: { ...DEFAULT_REQUEST }, status: '', loading: false, responseTime: null, responseHeaders: null, responseCookies: null, responseSize: null }
+  }
+  return s.tabs.find(t => t.id === s.activeTabId) || s.tabs[0]
+})
+export const useActiveRequest = () => useAppStore((s) => {
+  const activeTab = s.tabs && s.tabs.length > 0
+    ? (s.tabs.find(t => t.id === s.activeTabId) || s.tabs[0])
+    : null
+  return activeTab?.request || { ...DEFAULT_REQUEST }
+})

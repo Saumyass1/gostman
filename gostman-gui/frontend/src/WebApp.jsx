@@ -261,13 +261,15 @@ function WebApp() {
   }
 
   const handleImport = (importData) => {
-    if (importData.requests) {
+    if (!importData) return
+
+    if (importData.requests && Array.isArray(importData.requests)) {
       setRequests(importData.requests)
     }
-    if (importData.folders) {
+    if (importData.folders && Array.isArray(importData.folders)) {
       setFolders(importData.folders)
     }
-    if (importData.variables) {
+    if (importData.variables && typeof importData.variables === 'object') {
       setVariables(JSON.stringify(importData.variables, null, 2))
     }
   }

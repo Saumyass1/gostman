@@ -597,7 +597,7 @@ function getServerUrl(server) {
 
   // Substitute server variables with their default values
   if (server.variables) {
-    Object.entries(server.variables).forEach(([name, config]) => {
+    Object.entries(server.variables || {}).forEach(([name, config]) => {
       const defaultValue = config.default ?? config.enum?.[0]
       if (defaultValue === undefined) {
         // Variable has no default value - keep placeholder and warn
@@ -622,7 +622,7 @@ function getServerUrl(server) {
 function buildSecurityHeaders(securitySchemes = {}) {
   const headers = {}
 
-  Object.entries(securitySchemes).forEach(([, scheme]) => {
+  Object.entries(securitySchemes || {}).forEach(([, scheme]) => {
     if (scheme.type === 'http') {
       if (scheme.scheme === 'bearer') {
         headers['Authorization'] = 'Bearer {{token}}'
@@ -812,7 +812,7 @@ function buildOpenAPIBody(requestBody) {
 
   // Try examples (OpenAPI 3.1)
   if (content.examples) {
-    const firstExample = Object.values(content.examples)[0]
+    const firstExample = Object.values(content.examples || {})[0]
     if (firstExample?.value !== undefined) {
       const value = firstExample.value
       if (selectedType.includes('json') || selectedType.includes('ld+json')) {
@@ -1191,10 +1191,10 @@ export function importOpenAPISpec(openapiSpec) {
 
       // Build headers (security headers first, operation headers can override)
       const operationHeaders = extractOpenAPIHeaders(operation, pathParameters)
-      const headers = { ...securityHeaders }
+      const headers = { ...(securityHeaders || {}) }
 
       // Only add operation headers that don't conflict with security headers
-      Object.entries(operationHeaders).forEach(([key, value]) => {
+      Object.entries(operationHeaders || {}).forEach(([key, value]) => {
         if (!(key in securityHeaders)) {
           headers[key] = value
         }
@@ -1216,9 +1216,9 @@ export function importOpenAPISpec(openapiSpec) {
 
       // Build the full URL with path params substituted for display
       let displayUrl = fullPath
-      if (Object.keys(pathParams).length > 0) {
+      if (Object.keys(pathParams || {}).length > 0) {
         // Substitute path params for display URL
-        Object.entries(pathParams).forEach(([paramName, paramValue]) => {
+        Object.entries(pathParams || {}).forEach(([paramName, paramValue]) => {
           displayUrl = displayUrl.replace(`{${paramName}}`, paramValue)
         })
         // Store original path params in metadata for reference
@@ -1351,7 +1351,8 @@ export async function parseOpenAPISpec(specString) {
     }
 
     // Check for relative server URLs before processing
-    const { url: serverUrl, isRelative } = getServerUrl(validation.spec.servers?.[0])
+    const serverInfo = getServerUrl(validation.spec.servers?.[0]) || { url: '', isRelative: false }
+    const { url: serverUrl, isRelative } = serverInfo
     if (isRelative || !serverUrl) {
       return {
         success: false,

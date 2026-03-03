@@ -64,7 +64,7 @@ export function RequestTabs({
                 if (formatted.headers) {
                     // Ensure Content-Type is set for GraphQL
                     try {
-                        const currentHeaders = JSON.parse(activeRequest.headers || '{}')
+                        const currentHeaders = JSON.parse((activeRequest?.headers || '{}'))
                         const mergedHeaders = { ...currentHeaders, ...formatted.headers }
                         onUpdateField('headers', JSON.stringify(mergedHeaders, null, 2))
                     } catch (e) {
