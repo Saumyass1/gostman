@@ -36,7 +36,7 @@ export const useAppStore = create(
         promptDialog: { isOpen: false, title: '', message: '', placeholder: '', defaultValue: '', confirmText: 'OK', onConfirm: null, onCancel: null },
 
         // Requests
-        setRequests: (requests) => set({ requests }),
+        setRequests: (requests) => set({ requests: Array.isArray(requests) ? requests : [] }),
         addRequest: (request) => set((state) => ({ requests: [...state.requests, request] })),
         updateRequest: (id, updates) => set((state) => ({
           requests: state.requests.map(r => r.id === id ? { ...r, ...updates } : r)
@@ -44,7 +44,7 @@ export const useAppStore = create(
         deleteRequest: (id) => set((state) => ({ requests: state.requests.filter(r => r.id !== id) })),
 
         // Folders
-        setFolders: (folders) => set({ folders }),
+        setFolders: (folders) => set({ folders: Array.isArray(folders) ? folders : [] }),
         addFolder: (name) => {
           const id = `folder-${Date.now()}`
           set((state) => ({ folders: [...state.folders, { id, name, isOpen: true }] }))
@@ -63,7 +63,7 @@ export const useAppStore = create(
         }),
         deleteHistoryItem: (id) => set((state) => ({ requestHistory: state.requestHistory.filter(h => h.id !== id) })),
         clearHistory: () => set({ requestHistory: [] }),
-        setRequestHistory: (history) => set({ requestHistory: history }),
+        setRequestHistory: (history) => set({ requestHistory: Array.isArray(history) ? history : [] }),
 
         // Tabs
         setActiveTab: (tabId) => set({ activeTabId: tabId }),
@@ -150,6 +150,14 @@ export const useAppStore = create(
           folders: state.folders,
           variables: state.variables,
           requestHistory: state.requestHistory,
+        }),
+        merge: (persistedState, currentState) => ({
+          ...currentState,
+          ...persistedState,
+          // Ensure array fields are always arrays even if localStorage is corrupted
+          requests: Array.isArray(persistedState?.requests) ? persistedState.requests : [],
+          folders: Array.isArray(persistedState?.folders) ? persistedState.folders : [],
+          requestHistory: Array.isArray(persistedState?.requestHistory) ? persistedState.requestHistory : [],
         }),
       }
     ),
