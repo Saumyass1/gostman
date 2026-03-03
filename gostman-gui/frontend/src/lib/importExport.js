@@ -1678,6 +1678,12 @@ export async function validateOpenAPI(spec, options = {}) {
       spec = JSON.parse(spec)
     }
 
+    // Remove custom tracking properties that would cause validation errors
+    // These are added by our import processing but shouldn't be in the spec
+    const specCopy = { ...spec }
+    delete specCopy._externalRefs
+    delete specCopy._circularRefs
+
     // Basic structure validation
     if (!spec || typeof spec !== 'object') {
       return {
@@ -1687,7 +1693,7 @@ export async function validateOpenAPI(spec, options = {}) {
     }
 
     // Check for OpenAPI version
-    if (!spec.openapi && !spec.swagger) {
+    if (!specCopy.openapi && !specCopy.swagger) {
       return {
         valid: false,
         errors: [{ message: 'Spec must have openapi or swagger field' }]
@@ -1695,7 +1701,7 @@ export async function validateOpenAPI(spec, options = {}) {
     }
 
     if (shouldDereference) {
-      const result = await dereference(spec)
+      const result = await dereference(specCopy)
       // @scalar/openapi-parser dereference returns { schema, errors }
       if (result.schema) {
         return {
@@ -1713,12 +1719,12 @@ export async function validateOpenAPI(spec, options = {}) {
 
     // Use validate for validation without dereferencing
     try {
-      const result = await validate(spec)
+      const result = await validate(specCopy)
       // @scalar/openapi-parser validate returns { valid, errors }
       if (result.valid) {
         return {
           valid: true,
-          spec: spec
+          spec: spec  // Return original spec with tracking properties intact
         }
       }
       if (result.errors && result.errors.length > 0) {
@@ -1731,10 +1737,10 @@ export async function validateOpenAPI(spec, options = {}) {
       }
     } catch (validateError) {
       // If validate throws but basic structure is valid, accept it
-      if (spec.openapi && spec.info && spec.paths) {
+      if (specCopy.openapi && specCopy.info && specCopy.paths) {
         return {
           valid: true,
-          spec: spec
+          spec: spec  // Return original spec with tracking properties intact
         }
       }
       return {
