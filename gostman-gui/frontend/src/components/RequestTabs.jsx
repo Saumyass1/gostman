@@ -4,6 +4,7 @@ import { ScrollArea } from "./ui/scroll-area"
 import { Button } from "./ui/button"
 import { Braces, Hash, Heading1, FolderOpen, FlaskConical, Zap, Radio, AlertCircle, CheckCircle2 } from "lucide-react"
 import { TestScriptsPanel } from "./TestScriptsPanel"
+import { ParamsPanel } from "./ParamsPanel"
 import { validateEnvVariables, formatJSONError } from "../lib/validation"
 import { isWebSocketURL } from "./WebSocketPanel"
 // Lazy load panels
@@ -126,16 +127,12 @@ export function RequestTabs({
                 </TabsContent>
 
                 <TabsContent value="params" className="h-full p-0" noMargin>
-                    <div className="h-full">
-                        <EditorComponent
-                            value={activeRequest.queryParams}
-                            onChange={(e) => onUpdateField('queryParams', e.target.value)}
-                            language="json"
-                            placeholder='{\n  "query": "param",\n  "filter": "value"\n}'
-                            className="min-h-[300px] font-mono text-sm"
-                            height="100%"
-                        />
-                    </div>
+                    <ParamsPanel
+                        url={activeRequest.url}
+                        queryParams={activeRequest.queryParams}
+                        onUrlChange={(newUrl) => onUpdateField('url', newUrl)}
+                        onQueryParamsChange={(newParams) => onUpdateField('queryParams', newParams)}
+                    />
                 </TabsContent>
 
                 <TabsContent value="headers" className="h-full p-0" noMargin>

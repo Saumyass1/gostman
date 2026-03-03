@@ -16,6 +16,84 @@ import YAML from 'js-yaml'
 const MAX_RECURSION_DEPTH = 10
 const MAX_TRUNCATION_LENGTH = 50
 const DEBOUNCE_MS = 300
+const MAX_FOLDER_DEPTH = 100
+const MAX_VALIDATION_ERRORS = 10
+const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB in bytes
+
+// Valid HTTP methods for Postman request validation
+const VALID_HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE']
+
+/**
+ * Safely stringifies a value, handling circular references and other edge cases.
+ * Uses a WeakSet to track circular references and replaces them with a placeholder.
+ * @param {any} value - The value to stringify
+ * @param {string|null} [placeholder=null] - Placeholder for circular refs (defaults to "[Circular]")
+ * @returns {string} JSON string or empty string on error
+ */
+function safeStringify(value, placeholder = null) {
+  if (value === undefined) return ''
+  if (value === null) return 'null'
+
+  try {
+    // For primitives, return directly
+    if (typeof value !== 'object') {
+      return JSON.stringify(value)
+    }
+
+    // Handle circular references
+    const seen = new WeakSet()
+    const circularPlaceholder = placeholder || '[Circular Reference]'
+
+    const result = JSON.stringify(value, (key, val) => {
+      // Handle circular references
+      if (typeof val === 'object' && val !== null) {
+        if (seen.has(val)) {
+          return circularPlaceholder
+        }
+        seen.add(val)
+      }
+      // Handle functions
+      if (typeof val === 'function') {
+        return '[Function]'
+      }
+      // Handle undefined
+      if (val === undefined) {
+        return null
+      }
+      // Handle symbols
+      if (typeof val === 'symbol') {
+        return val.toString()
+      }
+      return val
+    }, 2)
+
+    return result
+  } catch (error) {
+    // Fallback for very complex objects or edge cases
+    console.warn('safeStringify failed:', error.message)
+    try {
+      return JSON.stringify(
+        Object.keys(value || {}).reduce((acc, key) => {
+          try {
+            acc[key] = typeof value[key] === 'object'
+              ? (Array.isArray(value[key]) ? [] : {})
+              : value[key]
+          } catch {
+            acc[key] = '[Error accessing value]'
+          }
+          return acc
+        }, {}),
+        null,
+        2
+      )
+    } catch {
+      return '{}'
+    }
+  }
+}
+
+// Export the constants for use in other modules
+export { MAX_FILE_SIZE, MAX_VALIDATION_ERRORS }
 
 /**
  * Simple UUID generator (using crypto.randomUUID if available, else fallback)
@@ -45,6 +123,7 @@ function encodeUTF8(str) {
 
 /**
  * Extract query parameters from a URL string or object
+ * FIX #6: Query parameter key validation - check param.key is non-empty string
  * @param {string|Object} url - URL string or Postman URL object
  * @returns {Object} Query parameters as key-value pairs
  */
@@ -69,8 +148,9 @@ function extractQueryParams(url) {
   if (url && url.query) {
     const queryList = Array.isArray(url.query) ? url.query : []
     queryList.forEach(param => {
-      if (!param.disabled && param.key) {
-        queryParams[param.key] = param.value || ''
+      // FIX #6: Validate param.key is a non-empty string
+      if (!param.disabled && param.key && typeof param.key === 'string' && param.key.trim()) {
+        queryParams[param.key] = param.value !== undefined ? String(param.value) : ''
       }
     })
   }
@@ -99,6 +179,7 @@ function extractHeaders(headers) {
 
 /**
  * Extract body from a Postman RequestBody
+ * FIX #7: GraphQL body extraction - validate query is string before using
  * @param {Object} requestBody - Postman RequestBody
  * @returns {string} Body as string
  */
@@ -118,7 +199,7 @@ function extractBody(requestBody) {
           }
         })
       }
-      return JSON.stringify(formData, null, 2)
+      return safeStringify(formData)
 
     case 'formdata':
       const form = {}
@@ -129,15 +210,16 @@ function extractBody(requestBody) {
           }
         })
       }
-      return JSON.stringify(form, null, 2)
+      return safeStringify(form)
 
     case 'graphql':
       if (requestBody.graphql) {
+        // FIX #7: Validate query is string before using
         if (typeof requestBody.graphql === 'string') {
           return requestBody.graphql
         }
-        if (requestBody.graphql.query) {
-          return JSON.stringify({ query: requestBody.graphql.query }, null, 2)
+        if (requestBody.graphql.query && typeof requestBody.graphql.query === 'string') {
+          return safeStringify({ query: requestBody.graphql.query })
         }
       }
       return ''
@@ -149,6 +231,7 @@ function extractBody(requestBody) {
 
 /**
  * Get URL from Postman request URL object
+ * FIX #2: URL building from parts - handle path as either array or string
  * @param {string|Object} url - URL string or Postman URL object
  * @returns {string} Full URL string
  */
@@ -164,7 +247,13 @@ function getUrlString(url) {
     const protocol = url.protocol.endsWith('://') ? url.protocol : url.protocol + '://'
     let urlString = protocol + (Array.isArray(url.host) ? url.host.join('.') : url.host)
     if (url.port) urlString += ':' + url.port
-    if (url.path) urlString += '/' + url.path.join('/')
+
+    // FIX #2: Handle path as either array or string using Array.isArray()
+    if (url.path) {
+      const pathStr = Array.isArray(url.path) ? url.path.join('/') : url.path
+      urlString += '/' + pathStr
+    }
+
     if (url.query && url.query.length > 0) {
       const params = url.query.filter(p => !p.disabled).map(p =>
         `${encodeURIComponent(p.key)}=${encodeURIComponent(p.value || '')}`
@@ -184,8 +273,16 @@ function getUrlString(url) {
  * @param {Array} requests - Accumulator for requests
  * @param {Array} folders - Accumulator for folders
  * @param {Set} usedIds - Set of already used IDs to prevent duplicates
+ * @param {Array} unsupportedAuthWarnings - Accumulator for unsupported auth warnings
+ * @param {number} depth - Current depth for recursion protection
  */
-function processPostmanItems(items, parentFolderId, requests, folders, usedIds = new Set()) {
+function processPostmanItems(items, parentFolderId, requests, folders, usedIds = new Set(), unsupportedAuthWarnings = [], depth = 0) {
+  // FIX #5: Max depth check to prevent stack overflow
+  if (depth > MAX_FOLDER_DEPTH) {
+    console.warn(`Postman import: maximum folder depth (${MAX_FOLDER_DEPTH}) exceeded, skipping deeper folders`)
+    return
+  }
+
   if (!Array.isArray(items)) return
 
   items.forEach(item => {
@@ -205,7 +302,8 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
         parentId: parentFolderId,
         description: item.description || ''
       })
-      processPostmanItems(item.item, folderId, requests, folders, usedIds)
+      // FIX #5: Pass depth + 1 to track recursion depth
+      processPostmanItems(item.item, folderId, requests, folders, usedIds, unsupportedAuthWarnings, depth + 1)
     }
     // Check if it's a request (has request object)
     else if (item.request) {
@@ -213,6 +311,12 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
 
       // Get URL
       const url = getUrlString(request.url)
+
+      // FIX #1: Missing URL validation - check if URL is empty and skip request
+      if (!url || !url.trim()) {
+        console.warn(`Postman import: skipping request "${item.name || 'Untitled'}" with empty URL`)
+        return
+      }
 
       // Extract query parameters
       const queryParams = extractQueryParams(request.url)
@@ -240,10 +344,26 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
           // Handle Unicode in credentials
           headers['Authorization'] = `Basic ${btoa(encodeUTF8(username + ':' + password))}`
         } else if (request.auth.type === 'apikey' && request.auth.apikey) {
+          // FIX #4: Improved apikey auth handling for different formats
           const apikeyAuth = Array.isArray(request.auth.apikey) ? request.auth.apikey[0] : request.auth.apikey
-          if (apikeyAuth?.key) {
-            headers[apikeyAuth.key] = apikeyAuth.value || '{{apiKey}}'
+          if (apikeyAuth) {
+            // Handle different Postman apikey formats
+            const key = apikeyAuth.key || apikeyAuth.value?.key
+            const value = apikeyAuth.value || apikeyAuth.value?.value || '{{apiKey}}'
+            if (key && typeof key === 'string') {
+              headers[key] = value
+            }
           }
+        } else if (request.auth.type === 'awsv4' || request.auth.type === 'ntlm' ||
+                   request.auth.type === 'digest' || request.auth.type === 'edgegrid' ||
+                   request.auth.type === 'oauth1' || request.auth.type === 'oauth2') {
+          // Track unsupported auth types
+          const warning = `Auth type '${request.auth.type}' is not fully supported. Request: ${item.name || 'Untitled'}`
+          if (!unsupportedAuthWarnings.includes(warning)) {
+            unsupportedAuthWarnings.push(warning)
+          }
+          // Add warning header so user knows about the limitation
+          headers['X-Gostman-Auth-Warning'] = `Unsupported auth type: ${request.auth.type}. Please configure manually.`
         }
       }
 
@@ -257,14 +377,27 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
       }
       usedIds.add(requestId)
 
+      // FIX #9: Trim request name and check for empty
+      let requestName = (item.name || request.name || 'Untitled Request').trim()
+      if (!requestName) {
+        requestName = 'Untitled Request'
+      }
+
+      // FIX #3: Missing HTTP method validation - validate and default to GET if invalid
+      let method = 'GET'
+      if (request.method) {
+        const normalizedMethod = request.method.toString().trim().toUpperCase()
+        method = VALID_HTTP_METHODS.includes(normalizedMethod) ? normalizedMethod : 'GET'
+      }
+
       requests.push({
         id: requestId,
-        name: item.name || request.name || 'Untitled Request',
+        name: requestName,
         url,
-        method: (request.method || 'GET').toUpperCase(),
-        headers: JSON.stringify(headers, null, 2),
+        method,
+        headers: safeStringify(headers),
         body,
-        queryParams: JSON.stringify(queryParams, null, 2),
+        queryParams: safeStringify(queryParams),
         response: '',
         folderId: parentFolderId,
         description: item.description || request.description || '',
@@ -277,7 +410,7 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
 /**
  * Converts a Postman collection to Gostman requests (native parser, no SDK dependency)
  * @param {Object|string} postmanCollection - Parsed Postman collection JSON
- * @returns {Object} Object with requests array, folders array, and collection name
+ * @returns {Object} Object with requests array, folders array, collection name, and warnings
  */
 export function importPostmanCollection(postmanCollection) {
   const data = typeof postmanCollection === 'string' ? JSON.parse(postmanCollection) : postmanCollection
@@ -285,17 +418,32 @@ export function importPostmanCollection(postmanCollection) {
   const requests = []
   const folders = []
   const usedIds = new Set()
+  const unsupportedAuthWarnings = []
 
   const collectionName = data?.info?.name || 'Imported Collection'
 
-  // Process items (can be at root or nested)
-  processPostmanItems(data.item || [], null, requests, folders, usedIds)
+  // Initialize external refs and circular refs tracking on the spec object
+  if (!data._externalRefs) {
+    data._externalRefs = []
+  }
+  if (!data._circularRefs) {
+    data._circularRefs = []
+  }
 
-  return { requests, folders, collectionName }
+  // Process items (can be at root or nested)
+  processPostmanItems(data.item || [], null, requests, folders, usedIds, unsupportedAuthWarnings)
+
+  return {
+    requests,
+    folders,
+    collectionName,
+    warnings: unsupportedAuthWarnings
+  }
 }
 
 /**
  * Parses a Postman collection JSON string (native parser, no SDK dependency)
+ * FIX #8: Collection schema validation - check schema contains 'postman.com/json/collection'
  * @param {string} jsonString - JSON string of Postman collection
  * @returns {Object} Parsed result with requests and folders
  */
@@ -303,11 +451,20 @@ export function parsePostmanCollection(jsonString) {
   try {
     const data = typeof jsonString === 'string' ? JSON.parse(jsonString) : jsonString
 
-    // Basic validation - check if it looks like a Postman collection
+    // FIX #8: Basic validation - check if it looks like a Postman collection
+    // Validate schema contains 'postman.com/json/collection'
     if (!data || !data.info || !data.info.schema) {
       return {
         success: false,
-        error: 'Invalid Postman collection format'
+        error: 'Invalid Postman collection format: missing info.schema'
+      }
+    }
+
+    const schema = data.info.schema
+    if (typeof schema === 'string' && !schema.includes('postman.com/json/collection')) {
+      return {
+        success: false,
+        error: 'Invalid Postman collection format: schema does not match Postman collection format'
       }
     }
 
@@ -327,12 +484,93 @@ export function parsePostmanCollection(jsonString) {
 }
 
 /**
+ * Validates a URL string for proper protocol and format
+ * @param {string} url - URL string to validate
+ * @returns {Object} Validation result with { valid: boolean, error?: string, isRelative?: boolean }
+ */
+function validateUrl(url) {
+  // Check if URL is provided
+  if (!url || typeof url !== 'string') {
+    return {
+      valid: false,
+      error: 'URL must be a non-empty string',
+      isRelative: false
+    }
+  }
+
+  const trimmedUrl = url.trim()
+
+  // Check if URL is empty after trimming
+  if (!trimmedUrl) {
+    return {
+      valid: false,
+      error: 'URL cannot be empty',
+      isRelative: false
+    }
+  }
+
+  // Check for valid protocol (http://, https://, ws://, wss://)
+  const validProtocols = ['http://', 'https://', 'ws://', 'wss://']
+  const hasValidProtocol = validProtocols.some(protocol =>
+    trimmedUrl.toLowerCase().startsWith(protocol)
+  )
+
+  if (!hasValidProtocol) {
+    // This is a relative URL (no protocol scheme)
+    return {
+      valid: false,
+      error: 'URL must have a valid protocol scheme (http://, https://, ws://, wss://)',
+      isRelative: true
+    }
+  }
+
+  // Try to parse the URL to validate format
+  try {
+    new URL(trimmedUrl)
+  } catch (err) {
+    return {
+      valid: false,
+      error: `Invalid URL format: ${err.message}`,
+      isRelative: false
+    }
+  }
+
+  // URL is valid
+  return { valid: true, isRelative: false }
+}
+
+/**
+ * Joins URL parts, handling trailing/leading slashes correctly
+ * @param {string} baseUrl - Base URL
+ * @param {string} path - Path to append
+ * @returns {string} Properly joined URL
+ *
+ * @example
+ * joinUrlParts("https://api.example.com", "/users") → "https://api.example.com/users"
+ * joinUrlParts("https://api.example.com/", "users") → "https://api.example.com/users"
+ * joinUrlParts("https://api.example.com/", "/users") → "https://api.example.com/users"
+ */
+function joinUrlParts(baseUrl, path) {
+  if (!baseUrl) return path || ''
+  if (!path) return baseUrl
+
+  // Remove trailing slash from baseUrl if present
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+
+  // Remove leading slash from path if present
+  const normalizedPath = path.startsWith('/') ? path.slice(1) : path
+
+  // Join with single slash
+  return normalizedBase + '/' + normalizedPath
+}
+
+/**
  * Gets base URL from server configuration, handling variables
  * @param {Object} server - OpenAPI server object
- * @returns {string} URL with variables substituted
+ * @returns {{url: string, isRelative: boolean}} Object with URL and relative flag
  */
 function getServerUrl(server) {
-  if (!server) return ''
+  if (!server) return { url: '', isRelative: false }
 
   let url = server.url || ''
 
@@ -344,7 +582,10 @@ function getServerUrl(server) {
     })
   }
 
-  return url
+  // Check if URL is relative (doesn't start with http:// or https://)
+  const isRelative = !url.match(/^https?:\/\//i)
+
+  return { url, isRelative }
 }
 
 /**
@@ -440,6 +681,16 @@ function extractOpenAPIPathParams(path, operation = {}, pathParameters = []) {
   // Extract values for each path parameter found in the URL
   pathParamNames.forEach(paramName => {
     const param = paramMap.get(paramName)
+
+    // Warn if path parameter is not defined in OpenAPI parameters
+    if (!param) {
+      console.warn(
+        `Path parameter "{${paramName}}" is used in the URL path ` +
+        `but is not defined in the OpenAPI parameters. ` +
+        `Add a parameter definition with 'in: path' and 'required: true'.`
+      )
+    }
+
     const value = param?.example ||
                   param?.schema?.example ||
                   getExampleValueFromSchema(param?.schema) ||
@@ -494,7 +745,13 @@ function buildOpenAPIBody(requestBody) {
   if (!requestBody) return ''
 
   const contentTypes = Object.keys(requestBody.content || {})
-  if (contentTypes.length === 0) return ''
+  if (contentTypes.length === 0) {
+    console.warn(
+      'Request body defined but has no content types. ' +
+      'Add at least one content type (e.g., application/json) to the requestBody.content object.'
+    )
+    return ''
+  }
 
   // Priority order for content types
   const typePriority = [
@@ -517,14 +774,14 @@ function buildOpenAPIBody(requestBody) {
   if (content.example !== undefined) {
     const example = content.example
     if (selectedType.includes('json') || selectedType.includes('ld+json')) {
-      return typeof example === 'string' ? example : JSON.stringify(example, null, 2)
+      return typeof example === 'string' ? example : safeStringify(example)
     }
     // For text types, return as-is if string
     if (selectedType.startsWith('text/') && typeof example === 'string') {
       return example
     }
     // For other types, stringify objects
-    return typeof example === 'object' ? JSON.stringify(example, null, 2) : String(example)
+    return typeof example === 'object' ? safeStringify(example) : String(example)
   }
 
   // Try examples (OpenAPI 3.1)
@@ -533,12 +790,12 @@ function buildOpenAPIBody(requestBody) {
     if (firstExample?.value !== undefined) {
       const value = firstExample.value
       if (selectedType.includes('json') || selectedType.includes('ld+json')) {
-        return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+        return typeof value === 'string' ? value : safeStringify(value)
       }
       if (selectedType.startsWith('text/') && typeof value === 'string') {
         return value
       }
-      return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
+      return typeof value === 'object' ? safeStringify(value) : String(value)
     }
   }
 
@@ -605,8 +862,15 @@ function getExampleValueFromSchema(schema) {
 function resolveRef(ref, spec) {
   if (!ref || !spec) return null
 
-  // Handle local references only (#/...)
+  // Handle external references - track them but don't resolve
   if (!ref.startsWith('#/')) {
+    // Track external refs in the spec
+    if (!spec._externalRefs) {
+      spec._externalRefs = []
+    }
+    if (!spec._externalRefs.includes(ref)) {
+      spec._externalRefs.push(ref)
+    }
     return null // External references not supported
   }
 
@@ -629,36 +893,50 @@ function resolveRef(ref, spec) {
  * Generates a JSON example from an OpenAPI schema
  * @param {Object} schema - OpenAPI schema object
  * @param {number} depth - Current recursion depth
- * @param {Set} seenRefs - Set of seen $ref paths to detect circular references
+ * @param {WeakSet} seenSchemas - WeakSet of seen schema objects to detect circular references
  * @param {Object} spec - Full OpenAPI spec for $ref resolution
  * @returns {string} JSON string of generated example
  */
-function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec = null) {
+function generateExampleFromSchema(schema, depth = 0, seenSchemas = new WeakSet(), spec = null) {
   if (depth > MAX_RECURSION_DEPTH) {
     return '{}'
   }
 
   if (!schema) return '{}'
 
-  function generate(schema, currentDepth, refs) {
+  // Initialize circular refs tracking on spec
+  if (spec && !spec._circularRefs) {
+    spec._circularRefs = []
+  }
+
+  function generate(schema, currentDepth, seen) {
     if (currentDepth > MAX_RECURSION_DEPTH) {
       return null
     }
 
     // Handle $ref by resolving it
     if (schema.$ref) {
-      if (refs.has(schema.$ref)) {
-        // Circular reference detected
-        return { _circular: schema.$ref }
-      }
-      refs.add(schema.$ref)
-
       const resolved = resolveRef(schema.$ref, spec)
-      if (resolved) {
-        return generate(resolved, currentDepth + 1, new Set(refs))
+
+      // Check for circular reference using WeakSet for object identity tracking
+      if (!resolved) {
+        return {}
       }
-      // If we can't resolve, return empty object as placeholder
-      return {}
+
+      // Track actual schema objects, not ref strings
+      if (seen.has(resolved)) {
+        // Circular reference detected - track and skip
+        if (spec && !spec._circularRefs.includes(schema.$ref)) {
+          spec._circularRefs.push(schema.$ref)
+        }
+        return null // Skip circular refs instead of including placeholder
+      }
+
+      // Create new WeakSet for this branch
+      const newSeen = new WeakSet(seen)
+      newSeen.add(resolved)
+
+      return generate(resolved, currentDepth + 1, newSeen)
     }
 
     // Handle allOf - merge all schemas
@@ -666,7 +944,7 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
       const result = {}
       let hasRequired = []
       schema.allOf.forEach(sub => {
-        const generated = generate(sub, currentDepth + 1, new Set(refs))
+        const generated = generate(sub, currentDepth + 1, new WeakSet(seen))
         if (generated && typeof generated === 'object') {
           Object.assign(result, generated)
           if (sub.required) {
@@ -684,7 +962,7 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
     // Handle anyOf - use first valid schema
     if (schema.anyOf && Array.isArray(schema.anyOf)) {
       for (const sub of schema.anyOf) {
-        const generated = generate(sub, currentDepth + 1, new Set(refs))
+        const generated = generate(sub, currentDepth + 1, new WeakSet(seen))
         if (generated !== null) {
           return generated
         }
@@ -696,12 +974,20 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
     if (schema.oneOf && Array.isArray(schema.oneOf)) {
       const schemas = schema.oneOf
       if (schemas.length > 0) {
-        return generate(schemas[0], currentDepth + 1, new Set(refs))
+        return generate(schemas[0], currentDepth + 1, new WeakSet(seen))
       }
       return {}
     }
 
     const schemaType = schema.type || (schema.properties ? 'object' : schema.enum ? 'string' : undefined)
+
+    // Warn about invalid schema without type, enum, or const
+    if (!schemaType && !schema.enum && schema.const === undefined) {
+      console.warn(
+        'Schema is missing "type" property and has no "enum" or "const" values. ' +
+        'This may result in invalid example generation.'
+      )
+    }
 
     switch (schemaType) {
       case 'string': {
@@ -717,7 +1003,7 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
         return schema.default !== undefined ? schema.default : true
       case 'array': {
         if (schema.items) {
-          return [generate(schema.items, currentDepth + 1, new Set(refs))]
+          return [generate(schema.items, currentDepth + 1, new WeakSet(seen))]
         }
         return []
       }
@@ -730,14 +1016,14 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
               propSchema.default !== undefined ||
               propSchema.example !== undefined ||
               propSchema.const !== undefined) {
-            obj[key] = generate(propSchema, currentDepth + 1, new Set(refs))
+            obj[key] = generate(propSchema, currentDepth + 1, new WeakSet(seen))
           }
         })
         // If object is empty, add at least one property for reference
         if (Object.keys(obj).length === 0) {
           const firstKey = Object.keys(schema.properties)[0]
           if (firstKey) {
-            obj[firstKey] = generate(schema.properties[firstKey], currentDepth + 1, new Set(refs))
+            obj[firstKey] = generate(schema.properties[firstKey], currentDepth + 1, new WeakSet(seen))
           }
         }
         return obj
@@ -755,7 +1041,7 @@ function generateExampleFromSchema(schema, depth = 0, seenRefs = new Set(), spec
     }
   }
 
-  const result = generate(schema, depth, new Set(seenRefs))
+  const result = generate(schema, depth, new WeakSet(seenSchemas))
   return JSON.stringify(result, null, 2)
 }
 
@@ -768,6 +1054,14 @@ export function importOpenAPISpec(openapiSpec) {
   const requests = []
   const folders = []
 
+  // Initialize tracking arrays
+  if (!openapiSpec._externalRefs) {
+    openapiSpec._externalRefs = []
+  }
+  if (!openapiSpec._circularRefs) {
+    openapiSpec._circularRefs = []
+  }
+
   // Reject Swagger 2.0
   if (openapiSpec.swagger && !openapiSpec.openapi) {
     throw new Error('Swagger 2.0 is not supported. Please use OpenAPI 3.x.')
@@ -777,11 +1071,38 @@ export function importOpenAPISpec(openapiSpec) {
   const collectionName = openapiSpec.info?.title || 'Imported OpenAPI Spec'
 
   // Get base URL from first server, handling variables
-  const baseUrl = getServerUrl(openapiSpec.servers?.[0])
+  const { url: baseUrl, isRelative } = getServerUrl(openapiSpec.servers?.[0])
+
+  // Check for missing or empty servers array
+  const servers = openapiSpec.servers
+  if (!servers || servers.length === 0 || !baseUrl) {
+    throw new Error(
+      'This OpenAPI spec has no servers defined or the server URL is empty. ' +
+      'Add a "servers" array with at least one server object containing a valid URL. ' +
+      'Example: servers: [{ url: "https://api.example.com" }]'
+    )
+  }
+
+  // Check for relative server URLs and provide a clear error
+  if (isRelative) {
+    throw new Error(
+      'This OpenAPI spec uses a relative server URL. ' +
+      'Please provide the full base URL (e.g., https://api.example.com)'
+    )
+  }
+
+  // Validate paths exist
+  const paths = openapiSpec.paths || {}
+  if (Object.keys(paths).length === 0) {
+    throw new Error(
+      'This OpenAPI spec has no paths defined. ' +
+      'A valid OpenAPI spec must define at least one path with an operation.'
+    )
+  }
 
   // First pass: collect all used tags
   const usedTags = new Set()
-  Object.values(openapiSpec.paths || {}).forEach(pathItem => {
+  Object.values(paths).forEach(pathItem => {
     const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'options', 'head', 'trace']
     httpMethods.forEach(method => {
       const operation = pathItem[method]
@@ -815,7 +1136,7 @@ export function importOpenAPISpec(openapiSpec) {
   // Process paths
   Object.entries(openapiSpec.paths || {}).forEach(([path, pathItem]) => {
     // Keep path as-is with {param} format
-    const fullPath = baseUrl + path
+    const fullPath = joinUrlParts(baseUrl, path)
 
     // Get path-level parameters (shared across all methods in this path)
     const pathParameters = pathItem.parameters || []
@@ -870,24 +1191,40 @@ export function importOpenAPISpec(openapiSpec) {
         metadata.openapi.pathParamsRaw = pathParams
       }
 
+      // Generate unique operation name with counter for duplicates
+      const operationNameBase = operation.summary || operation.operationId || `${method.toUpperCase()} ${path}`
+      let operationName = operationNameBase
+      let nameCounter = 1
+
+      // Ensure uniqueness by adding counter if name already exists
+      while (requests.some(r => r.name === operationName)) {
+        operationName = `${operationNameBase} (${nameCounter})`
+        nameCounter++
+      }
+
       requests.push({
         id: generateId(),
-        name: operation.summary || operation.operationId || `${method.toUpperCase()} ${path}`,
+        name: operationName,
         url: displayUrl,
         method: method.toUpperCase(),
-        headers: JSON.stringify(headers, null, 2),
+        headers: safeStringify(headers),
         body,
-        queryParams: queryParams !== null ? JSON.stringify(queryParams, null, 2) : '',
+        queryParams: queryParams !== null ? safeStringify(queryParams) : '',
         response: '',
         folderId,
         description: operation.description || '',
         createdAt: new Date().toISOString(),
-        metadata: JSON.stringify(metadata)
+        metadata: safeStringify(metadata)
       })
     })
   })
 
-  return { requests, folders, collectionName }
+  return {
+    requests,
+    folders,
+    collectionName,
+    warnings: []
+  }
 }
 
 /**
@@ -896,6 +1233,9 @@ export function importOpenAPISpec(openapiSpec) {
  * @returns {Promise<Object>} Parsed result with success flag, requests, folders, and error if failed
  */
 export async function parseOpenAPISpec(specString) {
+  let jsonError = null
+  let yamlError = null
+
   try {
     // Validate input is not empty
     if (!specString || typeof specString !== 'string' || !specString.trim()) {
@@ -907,12 +1247,22 @@ export async function parseOpenAPISpec(specString) {
 
     let spec
 
-    // Try JSON first
+    // Try JSON first, capture error for better reporting
     try {
       spec = JSON.parse(specString)
-    } catch {
-      // Try YAML
-      spec = parseYAML(specString)
+    } catch (jsonErr) {
+      jsonError = jsonErr
+      // Try YAML, capture error for better reporting
+      try {
+        spec = parseYAML(specString)
+      } catch (yamlErr) {
+        yamlError = yamlErr
+        // Both parsers failed - provide combined error message
+        return {
+          success: false,
+          error: `Could not parse the file as valid JSON or YAML.\n\nJSON error: ${jsonError.message || 'Invalid JSON syntax'}\nYAML error: ${yamlError.message || 'Invalid YAML syntax'}\n\nPlease check that your file is properly formatted.`
+        }
+      }
     }
 
     // Validate we got a proper object
@@ -921,6 +1271,14 @@ export async function parseOpenAPISpec(specString) {
         success: false,
         error: 'Invalid OpenAPI spec: could not parse as JSON or YAML'
       }
+    }
+
+    // Initialize external refs and circular refs tracking
+    if (!spec._externalRefs) {
+      spec._externalRefs = []
+    }
+    if (!spec._circularRefs) {
+      spec._circularRefs = []
     }
 
     // Validate and ensure it's OpenAPI 3.x or 3.1
@@ -943,19 +1301,48 @@ export async function parseOpenAPISpec(specString) {
     // Validate using @scalar/openapi-parser
     const validation = await validateOpenAPI(spec)
     if (!validation.valid) {
-      const errorMessages = validation.errors?.map(e => `- ${e.message || e}`).join('\n') || 'Unknown error'
+      // Limit errors to first MAX_VALIDATION_ERRORS and show count
+      const allErrors = validation.errors || []
+      const displayErrors = allErrors.slice(0, MAX_VALIDATION_ERRORS)
+      const errorMessages = displayErrors.map(e => `- ${e.message || e}`).join('\n')
+      const errorCount = allErrors.length
+      const countMessage = errorCount > MAX_VALIDATION_ERRORS
+        ? `\n(Showing ${MAX_VALIDATION_ERRORS} of ${errorCount} errors)`
+        : ''
+
       return {
         success: false,
-        error: 'Invalid OpenAPI spec:\n' + errorMessages
+        error: `Invalid OpenAPI spec:\n${errorMessages}${countMessage}`
+      }
+    }
+
+    // Check for relative server URLs before processing
+    const { url: serverUrl, isRelative } = getServerUrl(validation.spec.servers?.[0])
+    if (isRelative || !serverUrl) {
+      return {
+        success: false,
+        error: 'This OpenAPI spec uses a relative server URL (' + (serverUrl || '/path') + '). ' +
+               'Please edit the spec to include a full base URL (e.g., https://api.example.com' +
+               (serverUrl || '') + ')'
       }
     }
 
     // Import the validated spec
     const result = importOpenAPISpec(validation.spec)
 
+    // Add warnings about external refs if any were found
+    const warnings = []
+    if (validation.spec._externalRefs && validation.spec._externalRefs.length > 0) {
+      warnings.push(`Found ${validation.spec._externalRefs.length} external $ref(s) that could not be resolved. These may need to be resolved manually.`)
+    }
+    if (validation.spec._circularRefs && validation.spec._circularRefs.length > 0) {
+      warnings.push(`Skipped ${validation.spec._circularRefs.length} circular reference(s) during example generation.`)
+    }
+
     return {
       success: true,
-      ...result
+      ...result,
+      warnings
     }
   } catch (error) {
     return {
@@ -1300,9 +1687,11 @@ export async function validateOpenAPI(spec, options = {}) {
         }
       }
       if (result.errors && result.errors.length > 0) {
+        // Limit errors to MAX_VALIDATION_ERRORS
+        const limitedErrors = result.errors.slice(0, MAX_VALIDATION_ERRORS)
         return {
           valid: false,
-          errors: result.errors.map(e => ({ message: e.message || String(e) }))
+          errors: limitedErrors.map(e => ({ message: e.message || String(e) }))
         }
       }
     } catch (validateError) {
@@ -1339,7 +1728,12 @@ export async function validateOpenAPI(spec, options = {}) {
  * @returns {string} OpenAPI JSON string
  */
 export function exportToOpenAPIJSON(requests, options = {}) {
-  return JSON.stringify(exportToOpenAPI(requests, options), null, 2)
+  try {
+    return safeStringify(exportToOpenAPI(requests, options))
+  } catch (error) {
+    console.warn('exportToOpenAPIJSON failed, falling back to standard stringify:', error.message)
+    return JSON.stringify(exportToOpenAPI(requests, options), null, 2)
+  }
 }
 
 /**
