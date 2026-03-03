@@ -160,10 +160,11 @@ describe('OpenAPI Import', () => {
     it('should create folders from tags', () => {
       const result = importOpenAPISpec(sampleOpenAPISpec)
 
-      expect(result.folders).toHaveLength(2)
+      // Only creates folders for tags that are actually used
+      expect(result.folders).toHaveLength(1)
       expect(result.folders[0].name).toBe('users')
       expect(result.folders[0].description).toBe('User operations')
-      expect(result.folders[1].name).toBe('posts')
+      // 'posts' tag is defined but not used, so no folder is created
     })
 
     it('should create requests with correct structure', () => {

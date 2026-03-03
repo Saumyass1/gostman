@@ -200,7 +200,21 @@ function WebApp() {
       addToHistory({ ...activeRequest, url })
 
       const response = await sendProxyRequest({ method, url, headers, body })
-      const { response: responseData, responseHeaders, responseType, status: statusText } = await processResponse(response)
+      // Proxy returns JSON: {status, headers: [{key, value}], body}
+      const proxyResponse = await response.json()
+
+      // Extract data from proxy response
+      const responseData = proxyResponse.body || ''
+      const responseHeaders = proxyResponse.headers || []
+      const statusText = proxyResponse.status || 'Error'
+
+      // Detect response type from Content-Type header
+      let responseType = 'text'
+      const ctHeader = responseHeaders.find(h => h.key.toLowerCase() === 'content-type')
+      const contentType = ctHeader?.value || ''
+      if (contentType.includes('image/')) responseType = 'image'
+      else if (contentType.includes('text/html')) responseType = 'html'
+      else if (contentType.includes('application/json')) responseType = 'json'
 
       setWebResponseTime(getResponseTime())
       setActiveRequest(prev => ({
