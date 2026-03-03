@@ -124,8 +124,9 @@ function encodeUTF8(str) {
 /**
  * Extract query parameters from a URL string or object
  * FIX #6: Query parameter key validation - check param.key is non-empty string
+ * FIX: Handle duplicate query param keys by using arrays
  * @param {string|Object} url - URL string or Postman URL object
- * @returns {Object} Query parameters as key-value pairs
+ * @returns {Object} Query parameters as key-value pairs (arrays for duplicates)
  */
 function extractQueryParams(url) {
   const queryParams = {}
@@ -135,7 +136,16 @@ function extractQueryParams(url) {
     try {
       const urlObj = new URL(url)
       urlObj.searchParams.forEach((value, key) => {
-        queryParams[key] = value
+        // Handle duplicates: if key exists, convert to array or append to array
+        if (key in queryParams) {
+          if (Array.isArray(queryParams[key])) {
+            queryParams[key].push(value)
+          } else {
+            queryParams[key] = [queryParams[key], value]
+          }
+        } else {
+          queryParams[key] = value
+        }
       })
     } catch (err) {
       // Invalid URL, return empty
@@ -150,7 +160,17 @@ function extractQueryParams(url) {
     queryList.forEach(param => {
       // FIX #6: Validate param.key is a non-empty string
       if (!param.disabled && param.key && typeof param.key === 'string' && param.key.trim()) {
-        queryParams[param.key] = param.value !== undefined ? String(param.value) : ''
+        const value = param.value !== undefined ? String(param.value) : ''
+        // Handle duplicates: if key exists, convert to array or append to array
+        if (param.key in queryParams) {
+          if (Array.isArray(queryParams[param.key])) {
+            queryParams[param.key].push(value)
+          } else {
+            queryParams[param.key] = [queryParams[param.key], value]
+          }
+        } else {
+          queryParams[param.key] = value
+        }
       }
     })
   }
@@ -169,7 +189,8 @@ function extractHeaders(headers) {
   if (!Array.isArray(headers)) return result
 
   headers.forEach(header => {
-    if (!header.disabled && header.key) {
+    // Validate key is non-empty string and trim whitespace
+    if (!header.disabled && header.key && typeof header.key === 'string' && header.key.trim()) {
       result[header.key] = header.value || ''
     }
   })
@@ -297,7 +318,7 @@ function processPostmanItems(items, parentFolderId, requests, folders, usedIds =
 
       folders.push({
         id: folderId,
-        name: item.name || 'Folder',
+        name: (item.name || 'Folder').trim().substring(0, 100), // Max 100 chars
         isOpen: false,
         parentId: parentFolderId,
         description: item.description || ''
@@ -577,7 +598,12 @@ function getServerUrl(server) {
   // Substitute server variables with their default values
   if (server.variables) {
     Object.entries(server.variables).forEach(([name, config]) => {
-      const defaultValue = config.default || config.enum?.[0] || ''
+      const defaultValue = config.default ?? config.enum?.[0]
+      if (defaultValue === undefined) {
+        // Variable has no default value - keep placeholder and warn
+        console.warn(`Server variable {${name}} has no default value`)
+        return // Don't substitute - leave placeholder intact
+      }
       url = url.replace(`{${name}}`, defaultValue)
     })
   }
@@ -897,7 +923,7 @@ function resolveRef(ref, spec) {
  * @param {Object} spec - Full OpenAPI spec for $ref resolution
  * @returns {string} JSON string of generated example
  */
-function generateExampleFromSchema(schema, depth = 0, seenSchemas = new WeakSet(), spec = null) {
+function generateExampleFromSchema(schema, depth = 0, seenSchemas = null, spec = null) {
   if (depth > MAX_RECURSION_DEPTH) {
     return '{}'
   }
@@ -908,6 +934,10 @@ function generateExampleFromSchema(schema, depth = 0, seenSchemas = new WeakSet(
   if (spec && !spec._circularRefs) {
     spec._circularRefs = []
   }
+
+  // Ensure fresh WeakSet for each top-level call (not passed from caller)
+  // This prevents accumulation of seen objects across separate calls
+  const freshSeenSchemas = seenSchemas || new WeakSet()
 
   function generate(schema, currentDepth, seen) {
     if (currentDepth > MAX_RECURSION_DEPTH) {
@@ -1041,7 +1071,7 @@ function generateExampleFromSchema(schema, depth = 0, seenSchemas = new WeakSet(
     }
   }
 
-  const result = generate(schema, depth, new WeakSet(seenSchemas))
+  const result = generate(schema, depth, new WeakSet(freshSeenSchemas))
   return JSON.stringify(result, null, 2)
 }
 
@@ -1187,7 +1217,11 @@ export function importOpenAPISpec(openapiSpec) {
       // Build the full URL with path params substituted for display
       let displayUrl = fullPath
       if (Object.keys(pathParams).length > 0) {
-        // Store path params in metadata, keep URL with {param} format
+        // Substitute path params for display URL
+        Object.entries(pathParams).forEach(([paramName, paramValue]) => {
+          displayUrl = displayUrl.replace(`{${paramName}}`, paramValue)
+        })
+        // Store original path params in metadata for reference
         metadata.openapi.pathParamsRaw = pathParams
       }
 
@@ -1212,7 +1246,7 @@ export function importOpenAPISpec(openapiSpec) {
         queryParams: queryParams !== null ? safeStringify(queryParams) : '',
         response: '',
         folderId,
-        description: operation.description || '',
+        description: operation.description || operation.summary || '',
         createdAt: new Date().toISOString(),
         metadata: safeStringify(metadata)
       })

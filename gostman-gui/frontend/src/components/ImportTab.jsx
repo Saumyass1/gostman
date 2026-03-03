@@ -29,8 +29,10 @@ export function ImportTab({ onImport, onClose }) {
     const [isPending, setIsPending] = useState(false)
     const [processingStep, setProcessingStep] = useState(null)
     const [fileName, setFileName] = useState(null)
+    const [isDropZoneFocused, setIsDropZoneFocused] = useState(false)
     const fileInputRef = useRef(null)
     const debounceTimerRef = useRef(null)
+    const dropZoneRef = useRef(null)
 
     // Debounced process function with visual feedback
     const debouncedProcessImport = useCallback((jsonString) => {
@@ -47,14 +49,28 @@ export function ImportTab({ onImport, onClose }) {
         }, DEBOUNCE_DELAY)
     }, [])
 
-    // Reset pending state when debounce timer is cleared (input stopped)
+    // Cleanup on unmount - cancel any pending debounced operations
     useEffect(() => {
         return () => {
             if (debounceTimerRef.current) {
                 clearTimeout(debounceTimerRef.current)
             }
+            setIsPending(false)
+            setProcessingStep(null)
         }
     }, [])
+
+    const handleDropZoneClick = () => {
+        fileInputRef.current?.click()
+    }
+
+    const handleDropZoneKeyDown = (e) => {
+        // Activate on Enter or Space key
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            handleDropZoneClick()
+        }
+    }
 
     const handleFileUpload = (e) => {
         const file = e.target.files?.[0]
@@ -67,6 +83,10 @@ export function ImportTab({ onImport, onClose }) {
                 success: false,
                 error: `File size (${sizeInMB}MB) exceeds maximum allowed size of 10MB. Please use a smaller file.`
             })
+            // Reset file input so user can retry
+            if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+            }
             return
         }
 
@@ -84,6 +104,10 @@ export function ImportTab({ onImport, onClose }) {
             setIsParsing(false)
             setIsPending(false)
             setProcessingStep(null)
+            // Reset file input so user can retry
+            if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+            }
         }
 
         reader.onabort = () => {
@@ -94,6 +118,10 @@ export function ImportTab({ onImport, onClose }) {
             setIsParsing(false)
             setIsPending(false)
             setProcessingStep(null)
+            // Reset file input so user can retry
+            if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+            }
         }
 
         reader.onload = (event) => {
@@ -109,6 +137,10 @@ export function ImportTab({ onImport, onClose }) {
                 setIsParsing(false)
                 setIsPending(false)
                 setProcessingStep(null)
+                // Reset file input so user can retry
+                if (fileInputRef.current) {
+                    fileInputRef.current.value = ''
+                }
             }
         }
 
@@ -244,7 +276,23 @@ export function ImportTab({ onImport, onClose }) {
     return (
         <div className="space-y-6">
             {/* File Upload */}
-            <div className="border-2 border-dashed border-border/50 rounded-xl p-8 text-center hover:border-primary/50 transition-colors">
+            <div
+                ref={dropZoneRef}
+                tabIndex="0"
+                role="button"
+                aria-label="File upload area. Press Enter or Space to browse for files."
+                onClick={handleDropZoneClick}
+                onKeyDown={handleDropZoneKeyDown}
+                onFocus={() => setIsDropZoneFocused(true)}
+                onBlur={() => setIsDropZoneFocused(false)}
+                className={`
+                    border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer
+                    ${isDropZoneFocused
+                        ? 'border-primary bg-primary/5 ring-2 ring-ring ring-offset-2'
+                        : 'border-border/50 hover:border-primary/50'
+                    }
+                `}
+            >
                 <input
                     ref={fileInputRef}
                     type="file"
@@ -252,7 +300,7 @@ export function ImportTab({ onImport, onClose }) {
                     onChange={handleFileUpload}
                     className="hidden"
                 />
-                <div className="flex flex-col items-center gap-3">
+                <div className="flex flex-col items-center gap-3 pointer-events-none">
                     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
                         <Upload className="h-5 w-5 text-primary" />
                     </div>
@@ -267,8 +315,7 @@ export function ImportTab({ onImport, onClose }) {
                     <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="mt-2"
+                        className="mt-2 pointer-events-auto"
                         disabled={isParsing}
                     >
                         Choose File
@@ -294,8 +341,14 @@ export function ImportTab({ onImport, onClose }) {
                             if (e.target.value.trim()) {
                                 debouncedProcessImport(e.target.value)
                             } else {
+                                // Clear input - cancel any pending debounced operations
+                                if (debounceTimerRef.current) {
+                                    clearTimeout(debounceTimerRef.current)
+                                    debounceTimerRef.current = null
+                                }
                                 setImportResult(null)
                                 setIsPending(false)
+                                setProcessingStep(null)
                             }
                         }}
                     />
@@ -317,13 +370,17 @@ export function ImportTab({ onImport, onClose }) {
 
             {/* Import Result */}
             {importResult && (
-                <div className={`
-                    rounded-xl p-4 border
-                    ${importResult.success
-                        ? 'bg-emerald-500/10 border-emerald-500/20'
-                        : 'bg-destructive/10 border-destructive/20'
-                    }
-                  `}>
+                <div
+                    className={`
+                        rounded-xl p-4 border
+                        ${importResult.success
+                            ? 'bg-emerald-500/10 border-emerald-500/20'
+                            : 'bg-destructive/10 border-destructive/20'
+                        }
+                    `}
+                    role={importResult.success ? 'status' : 'alert'}
+                    aria-live={importResult.success ? 'polite' : 'assertive'}
+                >
                     <div className="flex items-start gap-3">
                         {importResult.success ? (
                             <Check className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />

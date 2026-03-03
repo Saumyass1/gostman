@@ -128,8 +128,8 @@ export function RequestTabs({
 
                 <TabsContent value="params" className="h-full p-0" noMargin>
                     <ParamsPanel
-                        url={activeRequest.url}
-                        queryParams={activeRequest.queryParams}
+                        url={activeRequest?.url || ''}
+                        queryParams={activeRequest?.queryParams || '{}'}
                         onUrlChange={(newUrl) => onUpdateField('url', newUrl)}
                         onQueryParamsChange={(newParams) => onUpdateField('queryParams', newParams)}
                     />

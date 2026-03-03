@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
+import React, { useState, useEffect, useRef, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Plus, Trash2, Hash, CheckCircle2, AlertCircle } from "lucide-react"
 import { Button } from "./ui/button"
@@ -31,10 +31,28 @@ const generateParamId = () => `param-${Date.now()}-${paramIdCounter++}`
 // Parse URL query string into params array
 const parseUrlParams = (url) => {
   if (!url) return []
+
+  // Split URL to get the query string portion only
+  // Fragment comes AFTER query string, so we need to extract query first
+  const questionMarkIndex = url.indexOf('?')
+  if (questionMarkIndex === -1) return []
+
+  const afterQuestion = url.substring(questionMarkIndex + 1)
+  // Find where the query string ends (either at # or end of string)
+  const hashIndex = afterQuestion.indexOf('#')
+  const queryStringOnly = hashIndex === -1 ? afterQuestion : afterQuestion.substring(0, hashIndex)
+
+  if (!queryStringOnly.trim()) return []
+
+  const params = []
+
   try {
-    const urlObj = new URL(url)
-    const params = []
-    urlObj.searchParams.forEach((value, key) => {
+    // Use URLSearchParams for proper parsing (handles encoding, duplicates, etc.)
+    const searchParams = new URLSearchParams(queryStringOnly)
+
+    // Iterate ALL entries (including duplicates)
+    const allEntries = [...searchParams.entries()]
+    allEntries.forEach(([key, value]) => {
       params.push({
         id: generateParamId(),
         key,
@@ -42,20 +60,13 @@ const parseUrlParams = (url) => {
         enabled: true
       })
     })
+
     return params
   } catch {
-    // If URL is invalid, try to parse query string manually
-    const queryString = url.split('?')[1]
-    if (!queryString) return []
-
-    // Handle fragment before parsing
-    const queryStringWithoutFragment = queryString.split('#')[0]
-
-    const params = []
-    queryStringWithoutFragment.split('&').forEach(param => {
+    // Manual fallback if URLSearchParams fails
+    queryStringOnly.split('&').forEach(param => {
       if (!param) return
 
-      // Handle params without = (flag params)
       const eqIndex = param.indexOf('=')
       let key, value
 
@@ -76,7 +87,6 @@ const parseUrlParams = (url) => {
             enabled: true
           })
         } catch {
-          // If decoding fails, use raw values
           params.push({
             id: generateParamId(),
             key,
@@ -95,42 +105,30 @@ const buildUrlWithParams = (originalUrl, params) => {
   if (!originalUrl) return ''
 
   try {
-    const urlObj = new URL(originalUrl)
+    // Extract fragment before processing
+    const hashIndex = originalUrl.indexOf('#')
+    const urlWithoutFragment = hashIndex === -1 ? originalUrl : originalUrl.substring(0, hashIndex)
+    const fragment = hashIndex === -1 ? '' : originalUrl.substring(hashIndex) // Include the #
 
-    // Clear existing params but keep fragment
-    urlObj.search = ''
+    // Parse the URL (or construct base URL)
+    let baseUrl = urlWithoutFragment
+    const questionMarkIndex = urlWithoutFragment.indexOf('?')
+    if (questionMarkIndex !== -1) {
+      baseUrl = urlWithoutFragment.substring(0, questionMarkIndex)
+    }
 
-    // Add enabled params (only those with non-empty keys)
+    // Build query string using URLSearchParams
+    const searchParams = new URLSearchParams()
     params
       .filter(p => p.enabled && p.key?.trim())
       .forEach(p => {
-        urlObj.searchParams.append(p.key.trim(), p.value || '')
+        searchParams.append(p.key.trim(), p.value || '')
       })
 
-    return urlObj.toString()
+    const queryString = searchParams.toString()
+    return baseUrl + (queryString ? `?${queryString}` : '') + fragment
   } catch {
-    // If URL is invalid or incomplete, try to build manually
-    try {
-      const [baseWithoutQuery, ...rest] = originalUrl.split('?')
-      const queryString = rest.join('?')
-
-      // Preserve fragment
-      const [baseWithoutFragment, fragment] = baseWithoutQuery.split('#')
-      const fragmentPart = fragment ? `#${fragment}` : ''
-
-      // Build query string
-      const searchParams = new URLSearchParams()
-      params
-        .filter(p => p.enabled && p.key?.trim())
-        .forEach(p => {
-          searchParams.append(p.key.trim(), p.value || '')
-        })
-
-      const queryStringBuilt = searchParams.toString()
-      return baseWithoutFragment + (queryStringBuilt ? `?${queryStringBuilt}` : '') + fragmentPart
-    } catch {
-      return originalUrl
-    }
+    return originalUrl
   }
 }
 
@@ -140,7 +138,20 @@ const paramsToJson = (params) => {
   params
     .filter(p => p.enabled && p.key?.trim())
     .forEach(p => {
-      result[p.key.trim()] = p.value || ''
+      const key = p.key.trim()
+      const value = p.value || ''
+
+      // Handle duplicate keys by converting to array
+      if (key in result) {
+        const existing = result[key]
+        if (Array.isArray(existing)) {
+          existing.push(value)
+        } else {
+          result[key] = [existing, value]
+        }
+      } else {
+        result[key] = value
+      }
     })
   return JSON.stringify(result, null, 2)
 }
@@ -148,28 +159,36 @@ const paramsToJson = (params) => {
 // Convert JSON object to params array
 const jsonToParams = (jsonStr) => {
   try {
-    const obj = typeof jsonStr === 'string' ? JSON.parse(jsonStr || '{}') : jsonStr
-    return Object.entries(obj).map(([key, value]) => ({
-      id: generateParamId(),
-      key,
-      value: String(value),
-      enabled: true
-    }))
+    const parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr || '{}') : jsonStr
+    // Handle null, undefined, or non-object values
+    const obj = (parsed && typeof parsed === 'object') ? parsed : {}
+    const params = []
+
+    Object.entries(obj).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        // Handle arrays (from duplicate keys)
+        value.forEach(v => {
+          params.push({
+            id: generateParamId(),
+            key,
+            value: v == null ? '' : String(v),
+            enabled: true
+          })
+        })
+      } else {
+        params.push({
+          id: generateParamId(),
+          key,
+          value: value == null ? '' : String(value),
+          enabled: true
+        })
+      }
+    })
+
+    return params
   } catch {
     return []
   }
-}
-
-// Deep comparison for params
-const paramsAreEqual = (a, b) => {
-  if (a.length !== b.length) return false
-  return a.every((pa, i) => {
-    const pb = b[i]
-    return pa.id === pb.id &&
-      pa.key === pb.key &&
-      pa.value === pb.value &&
-      pa.enabled === pb.enabled
-  })
 }
 
 export function ParamsPanel({
@@ -178,71 +197,85 @@ export function ParamsPanel({
   onUrlChange,
   onQueryParamsChange
 }) {
-  // Use refs to track update sources
+  // Use a single ref to track if we're updating (prevents loops)
   const isInternalUpdate = useRef(false)
-  const isExternalUpdate = useRef(false)
+  const lastKnownUrlParams = useRef('')
 
-  // Parse params from queryParams JSON on mount/initial render
+  // Parse params on mount - prioritize URL params, then JSON params
   const [params, setParams] = useState(() => {
-    // Check if URL has params first, otherwise use JSON
-    const urlParams = parseUrlParams(url)
-    return urlParams.length > 0 ? urlParams : jsonToParams(queryParams)
+    const urlParams = parseUrlParams(url || '')
+    if (urlParams.length > 0) {
+      lastKnownUrlParams.current = url
+      return urlParams
+    }
+    return jsonToParams(queryParams || '{}')
   })
 
-  // Stable callbacks to avoid stale closures
+  // Ref for tracking the new param to focus
+  const newParamIdRef = useRef(null)
+
+  // Stable callbacks
   const handleUrlChange = useCallback(onUrlChange, [onUrlChange])
   const handleQueryParamsChange = useCallback(onQueryParamsChange, [onQueryParamsChange])
 
-  // Track the last processed URL to avoid redundant processing
-  const lastProcessedUrl = useRef('')
+  // Extract query string signature for comparison
+  const getQueryStringSignature = useCallback((urlStr) => {
+    const idx = urlStr.indexOf('?')
+    if (idx === -1) return ''
+    const hashIdx = urlStr.indexOf('#', idx)
+    const end = hashIdx === -1 ? urlStr.length : hashIdx
+    return urlStr.substring(idx, end)
+  }, [])
 
-  // Sync params when URL changes externally (not from our updates)
+  // Sync params when URL changes externally
   useEffect(() => {
-    // Skip if this is an internal update
+    // Skip if we're the ones who changed the URL
     if (isInternalUpdate.current) {
       isInternalUpdate.current = false
-      lastProcessedUrl.current = url
       return
     }
 
-    // Skip if URL hasn't actually changed
-    if (url === lastProcessedUrl.current) return
+    const currentSignature = getQueryStringSignature(url)
+    const lastSignature = getQueryStringSignature(lastKnownUrlParams.current)
 
-    lastProcessedUrl.current = url
-    isExternalUpdate.current = true
+    // Only process if the query string actually changed
+    if (currentSignature === lastSignature) return
 
+    lastKnownUrlParams.current = url
     const urlParams = parseUrlParams(url)
 
-    if (urlParams.length > 0) {
-      setParams(prev => {
-        // Create a map of existing params by key
-        const existingByKey = new Map()
-        prev.forEach(p => {
-          if (p.key) existingByKey.set(p.key, p)
-        })
-
-        // Merge: keep existing params with same key, add new ones from URL
-        const merged = [...prev]
-        urlParams.forEach(up => {
-          if (!existingByKey.has(up.key)) {
-            merged.push(up)
-          }
-        })
-
-        return merged
+    setParams(prev => {
+      // Build a map of existing params by key
+      const existingByKey = new Map()
+      prev.forEach(p => {
+        if (p.key) existingByKey.set(p.key, p)
       })
-    }
 
-    // Clear external flag after state update
-    setTimeout(() => {
-      isExternalUpdate.current = false
-    }, 0)
-  }, [url])
+      // Replace params entirely based on URL (remove old ones, add new ones)
+      // This ensures params stay in sync with URL
+      const merged = []
+
+      // First, add all URL params
+      urlParams.forEach(up => {
+        merged.push(up)
+      })
+
+      // Then, add any existing params that aren't in the URL (user-added params not yet in URL)
+      const urlKeys = new Set(urlParams.map(p => p.key))
+      prev.forEach(p => {
+        if (p.key && !urlKeys.has(p.key)) {
+          merged.push(p)
+        }
+      })
+
+      return merged
+    })
+  }, [url, getQueryStringSignature])
 
   // Sync params when queryParams JSON changes externally
   useEffect(() => {
-    // Skip if this is an internal update or external URL update
-    if (isInternalUpdate.current || isExternalUpdate.current) return
+    // Skip if we're the ones who changed it
+    if (isInternalUpdate.current) return
 
     const jsonParams = jsonToParams(queryParams)
     if (jsonParams.length === 0) return
@@ -256,42 +289,51 @@ export function ParamsPanel({
 
   // Update URL and queryParams when params change
   useEffect(() => {
-    // Skip if this is from an external URL change
-    if (isExternalUpdate.current) return
+    // Skip if this change came from URL/JSON sync
+    if (isInternalUpdate.current) return
 
     // Build new URL with params
     const newUrl = buildUrlWithParams(url, params)
-
-    // Update queryParams JSON
     const jsonStr = paramsToJson(params)
 
-    // Batch updates to prevent multiple renders
+    // Mark as internal update
     isInternalUpdate.current = true
 
-    // Use requestAnimationFrame to batch updates
-    const updateUrl = () => {
-      if (newUrl !== url) {
-        handleUrlChange(newUrl)
-      }
+    // Update URL if changed
+    if (newUrl !== url) {
+      handleUrlChange(newUrl)
+      lastKnownUrlParams.current = newUrl
     }
 
-    const updateParams = () => {
-      if (jsonStr !== queryParams) {
-        handleQueryParamsChange(jsonStr)
-      }
+    // Update JSON if changed
+    if (jsonStr !== queryParams) {
+      handleQueryParamsChange(jsonStr)
     }
 
-    updateUrl()
-    updateParams()
-
-    // Reset flag after updates are processed
-    requestAnimationFrame(() => {
+    // Reset flag after a delay to ensure parent updates propagate
+    const timeoutId = setTimeout(() => {
       isInternalUpdate.current = false
-    })
+    }, 50)
+
+    return () => clearTimeout(timeoutId)
   }, [params, url, queryParams, handleUrlChange, handleQueryParamsChange])
 
+  // Focus new param when added
+  useEffect(() => {
+    if (newParamIdRef.current) {
+      const input = document.querySelector(`[data-param-id="${newParamIdRef.current}"]`)
+      if (input) {
+        input.focus()
+        input.select()
+      }
+      newParamIdRef.current = null
+    }
+  }, [params])
+
   const addParam = useCallback(() => {
-    setParams(prev => [...prev, { id: generateParamId(), key: '', value: '', enabled: true }])
+    const newId = generateParamId()
+    setParams(prev => [...prev, { id: newId, key: '', value: '', enabled: true }])
+    newParamIdRef.current = newId
   }, [])
 
   const removeParam = useCallback((id) => {
@@ -365,84 +407,101 @@ export function ParamsPanel({
         </p>
       </motion.div>
 
-      {/* Key-Value List */}
+      {/* Key-Value List or Empty State */}
       <motion.div
         className="flex-1 overflow-y-auto"
         variants={itemVariants}
       >
         <div className="p-2">
-          {/* Header row */}
-          <div className="grid grid-cols-[40px_1fr_1fr_40px] gap-2 px-3 py-2 text-xs font-medium text-muted-foreground">
-            <div className="flex items-center justify-center">
-              <input
-                type="checkbox"
-                checked={allEnabled}
-                onChange={(e) => toggleAll(e.target.checked)}
-                className="w-4 h-4 rounded border-border/50"
-              />
-            </div>
-            <div>Key</div>
-            <div>Value</div>
-            <div />
-          </div>
-
-          {/* Params list */}
-          <AnimatePresence mode="popLayout">
-            {params.map((param) => (
-              <motion.div
-                key={param.id}
-                layout
-                initial={{ opacity: 0, y: -10, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9, height: 0 }}
-                transition={{ type: "spring", stiffness: 300, damping: 24 }}
-                className={`grid grid-cols-[40px_1fr_1fr_40px] gap-2 p-2 rounded-lg transition-colors ${
-                  !param.enabled ? 'opacity-50' : ''
-                }`}
-              >
-                {/* Enabled checkbox */}
+          {params.length === 0 ? (
+            /* Empty State */
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex flex-col items-center justify-center py-16 text-center"
+            >
+              <Hash className="h-12 w-12 text-muted-foreground/20 mb-4" />
+              <p className="text-sm text-muted-foreground mb-1">No query parameters</p>
+              <p className="text-xs text-muted-foreground/60 mb-4">
+                Add parameters to your URL or click "Add Parameter"
+              </p>
+            </motion.div>
+          ) : (
+            <>
+              {/* Header row */}
+              <div className="grid grid-cols-[40px_1fr_1fr_40px] gap-2 px-3 py-2 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center justify-center">
                   <input
                     type="checkbox"
-                    checked={param.enabled}
-                    onChange={() => toggleParam(param.id)}
+                    checked={allEnabled}
+                    onChange={(e) => toggleAll(e.target.checked)}
                     className="w-4 h-4 rounded border-border/50"
                   />
                 </div>
+                <div>Key</div>
+                <div>Value</div>
+                <div />
+              </div>
 
-                {/* Key input */}
-                <Input
-                  placeholder="Parameter name"
-                  value={param.key}
-                  onChange={(e) => updateParam(param.id, 'key', e.target.value)}
-                  className="h-9 text-sm bg-background/50 font-mono"
-                  disabled={!param.enabled}
-                  autoFocus={param.key === '' && param.enabled}
-                />
-
-                {/* Value input */}
-                <Input
-                  placeholder="Value"
-                  value={param.value}
-                  onChange={(e) => updateParam(param.id, 'value', e.target.value)}
-                  className="h-9 text-sm bg-background/50 font-mono"
-                  disabled={!param.enabled}
-                />
-
-                {/* Delete button */}
-                <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-9 w-9 text-destructive hover:text-destructive hover:bg-destructive/10"
-                    onClick={() => removeParam(param.id)}
+              {/* Params list */}
+              <AnimatePresence mode="popLayout">
+                {params.map((param) => (
+                  <motion.div
+                    key={param.id}
+                    layout
+                    initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9, height: 0 }}
+                    transition={{ type: "spring", stiffness: 300, damping: 24 }}
+                    className={`grid grid-cols-[40px_1fr_1fr_40px] gap-2 p-2 rounded-lg transition-colors ${
+                      !param.enabled ? 'opacity-50 bg-muted/20' : ''
+                    }`}
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </motion.div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+                    {/* Enabled checkbox */}
+                    <div className="flex items-center justify-center">
+                      <input
+                        type="checkbox"
+                        checked={param.enabled}
+                        onChange={() => toggleParam(param.id)}
+                        className="w-4 h-4 rounded border-border/50"
+                      />
+                    </div>
+
+                    {/* Key input */}
+                    <Input
+                      data-param-id={param.id}
+                      placeholder="Parameter name"
+                      value={param.key}
+                      onChange={(e) => updateParam(param.id, 'key', e.target.value)}
+                      className="h-9 text-sm bg-background/50 font-mono"
+                      disabled={!param.enabled}
+                    />
+
+                    {/* Value input */}
+                    <Input
+                      placeholder="Value"
+                      value={param.value}
+                      onChange={(e) => updateParam(param.id, 'value', e.target.value)}
+                      className="h-9 text-sm bg-background/50 font-mono"
+                      disabled={!param.enabled}
+                    />
+
+                    {/* Delete button */}
+                    <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-9 w-9 text-destructive hover:text-destructive hover:bg-destructive/10"
+                        onClick={() => removeParam(param.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </motion.div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </>
+          )}
 
           {/* Add button */}
           <motion.div whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }} className="mt-2">
